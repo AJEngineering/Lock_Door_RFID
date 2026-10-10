@@ -15,15 +15,17 @@ docs/              <- schematics: schemdraw scripts + PNG/SVG
 
 ## 1. Lock specifications
 
+<img src="docs/lock.jpg" alt="12 V fail-safe electric bolt lock" width="440">
+
 | Parameter | Value |
 |---|---|
-| Type | 12 V DC electric bolt lock, **fail-safe** (power-to-lock) |
+| Type | Electric drop-bolt lock, **fail-safe** (power-to-lock) |
 | Logic | Powered = locked, unpowered = open (also opens on power loss) |
-| Supply | 12 V DC |
-| Current | **2 A** inrush while the bolt is driven, **200 mA** hold |
-| Power | 24 W peak, 2.4 W hold |
+| Nameplate | VOLTAGE DC12V/24V ±0.5, CURRENT 150 mA. This project runs it at 12 V |
+| Current (design values) | Driver and supply sized for **2 A** inrush while the bolt is driven and **200 mA** hold (nameplate: 150 mA) |
+| Power at 12 V | 24 W peak, 2.4 W hold (design values), 1.8 W at the 150 mA nameplate |
 | Door sensor | Built-in magnetic sensor, dry contact COM/NO, closed = door closed |
-| Relock-delay selector | 0 / 3 / 6 s on the lock (`LOCK_HW_DELAY_MS` in `config.h` must match) |
+| Relock-delay selector | "Indicator" switch on the lock: 0SEC / 3SEC / 6SEC (`LOCK_HW_DELAY_MS` in `config.h` must match) |
 | Bolt drop condition | Lock powered **and** door magnet detected, then the selector delay |
 | Wires | Lock +, Lock − (power), COM, NO (door sensor) |
 

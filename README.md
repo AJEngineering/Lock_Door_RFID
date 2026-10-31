@@ -55,7 +55,7 @@ Full-resolution vector version: [`docs/wiring.svg`](docs/wiring.svg). Generated 
 | Card in enroll mode, already stored | **Removed** from NVS | long + short |
 | Card in enroll mode, store full (50) | Not added | 4 short |
 | Enroll button held 10 s | Erase all cards (1 Hz ticks from 2 s) | 1.2 s beep |
-| Door open for 15 s continuously after relock (`DOOR_OPEN_ALARM_MS`) | Door-left-open alarm until the door closes or a card/exit button unlocks | 3 short, every 3 s |
+| Door open for 15 s continuously after relock (`DOOR_OPEN_ALARM_MS`). With the align switch, also a door closed but not fully home while lock power is deferred | Door-left-open alarm until the door is closed (fully home) or a card/exit button unlocks | 3 short, every 3 s |
 | Door opens while locked (bolt already dropped) | **Forced-door alarm** until the door closes or a card/exit button unlocks | 4 long, every 3 s |
 
 Cards are stored in NVS (`Preferences`, namespace `doorlock`, key `cards`) as one blob of 11-byte UID records; the card count is the blob length / 11. They survive power loss and re-flashing (unless you erase flash). The unlock time is stored in NVS too.
@@ -64,6 +64,14 @@ Cards are stored in NVS (`Preferences`, namespace `doorlock`, key `cards`) as on
 - The new list is written to NVS first and becomes active only if the write succeeds. If a write fails, nothing changes, the buzzer gives a long beep and the log says `NOT added` / `NOT removed` / `NOT erased`.
 
 Every 5 s (`RC522_CHECK_INTERVAL_MS`) the firmware checks the RC522: `VersionReg` (SPI alive), `TxControlReg` bits 1..0 (antenna drivers on), `TxASKReg` = 0x40 and RxGain = max (configuration still loaded). After ESD or a supply glitch the reader can reset its registers and stop reading cards while `VersionReg` still answers; any failed check re-initialises it and logs `[RFID] reader <fault> (...), re-init`.
+
+**Supported cards.** The RC522 reads **ISO/IEC 14443A** cards only: MIFARE Classic 1K/4K, MIFARE Ultralight, NTAG21x, DESFire, MIFARE Plus. Their UID is 4, 7 or 10 bytes (anticollision cascade levels 1..3, there is no 6-byte UID). The firmware stores and compares all three lengths. The RC522 cannot read other 13.56 MHz standards: ISO 15693 (ICODE SLI/SLIX, Tag-it), ISO 14443B, FeliCa, or 125 kHz cards. For those you need a different reader (PN532 for 14443B/FeliCa, PN5180 or CLRC663 for ISO 15693). What the log shows when a card is presented:
+
+| Log | Meaning |
+|---|---|
+| nothing | No ISO 14443A answer: wrong card standard, or card too far from the antenna |
+| `[RFID] card answered (ATQA xx xx) but UID read failed: ...` | 14443A answer but anticollision failed: non-standard card (e.g. Topaz/Jewel) or poor coupling |
+| `[RFID] denied <UID> (<n> bytes, <type>)` | Card read correctly but not stored: enroll it |
 
 ### Door sensor and relock-delay selector (0 / 3 / 6 s)
 
@@ -84,6 +92,21 @@ Recommended: selector at **0 s**. The bolt can't drop into an open door (the loc
 
 The 2 A inrush is drawn when the bolt is driven (at the end of the delay), with the MOSFET already fully on.
 
+### Sliding doors: door-aligned switch (optional)
+
+On a sliding door the lock's magnetic sensor can report "closed" while the door is still a few cm short of the strike. The firmware reads the same COM/NO contact, so it cannot tell the difference, and a powered lock drops the bolt onto the strike body. The fix:
+
+1. A mechanical door stop (with a roller or magnetic catch) at the closed position, so the door always comes to rest aligned with the strike.
+2. A microswitch at the stop, pressed only when the door is fully home, on GPIO4 (NO contact to GND). Enable it with `DOOR_ALIGN_SENSOR_ENABLED 1` in `config.h` (default `0`). For an NC contact set `DOOR_ALIGN_CLOSED_IS_ALIGNED false`.
+
+With the switch enabled:
+
+- The lock is powered only when the magnetic sensor reads closed **and** the switch reads aligned, both stable for `RELOCK_CLOSE_DELAY_MS` (1 s). This applies to every relock: door close, unlock time expiry and boot.
+- Once the lock is powered, the switch is ignored, so play between the bolt and the strike can't remove power or raise an alarm.
+- If the door stays closed but not fully home for 15 s while lock power is deferred, the alarm sounds with `[ALARM] door not fully closed (align switch open)` until the door is pushed home or a card/exit button unlocks.
+- The log prints `[DOOR] ALIGNED` / `[DOOR] NOT ALIGNED`, and the boot log shows the switch state.
+- Fit and wire the switch before enabling it: an open or disconnected switch keeps the lock unpowered (door unlocked) and the alarm sounding.
+
 ### Serial console (115200 baud)
 
 | Command | Effect |
@@ -95,7 +118,7 @@ The 2 A inrush is drawn when the bolt is driven (at the end of the delay), with 
 | `clear` | Erase all cards |
 | `time <ms>` | Set unlock time, 500..60000 ms, saved to NVS |
 
-The log prints every door change as `[DOOR] OPEN` / `[DOOR] CLOSED`. If it reads inverted, flip `DOOR_SENSE_CLOSED_IS_DOOR_CLOSED`.
+The log prints every door change as `[DOOR] OPEN` / `[DOOR] CLOSED`. If it reads inverted, flip `DOOR_SENSE_CLOSED_IS_DOOR_CLOSED`. With the align switch enabled it also prints `[DOOR] ALIGNED` / `[DOOR] NOT ALIGNED`; if that reads inverted, flip `DOOR_ALIGN_CLOSED_IS_ALIGNED`.
 
 ---
 
@@ -113,6 +136,7 @@ The log prints every door change as `[DOOR] OPEN` / `[DOOR] CLOSED`. If it reads
 | 27 | Door sensor | Lock NO (COM -> GND), magnetic, closed = door closed | INPUT_PULLUP + external 10 kΩ |
 | 32 | Exit button | Button -> GND | INPUT_PULLUP |
 | 33 | Enroll button | Button -> GND | INPUT_PULLUP, mount **inside** |
+| 4 | Door-aligned switch (optional) | Microswitch at the door stop -> GND | INPUT_PULLUP, `DOOR_ALIGN_SENSOR_ENABLED` |
 | 2 | Status LED | On-board LED | strapping pin, LED only |
 | 3V3 | | RC522 3.3V | **RC522 is 3.3 V only** |
 | GND | | Common ground (ESP, RC522, MOSFET source, 12 V –) | |
@@ -294,6 +318,8 @@ D1 = 1N4007 (1 A) across the lock, cathode to lock + (+12 V in options A/B, IRF4
 
 **Exit and enroll buttons**: one side to GND, other side to GPIO32 / GPIO33. For cable runs > 1 m add 10 kΩ pull-up to 3.3 V + 100 nF to GND.
 
+**Door-aligned switch (optional, sliding doors)**: microswitch at the door stop, COM -> GND, NO -> GPIO4, positioned so it closes only in the last few mm of travel, when the bolt is over the strike hole. Same 10 kΩ + 100 nF as the buttons for a long cable. Then set `DOOR_ALIGN_SENSOR_ENABLED 1`.
+
 **Buzzer** (active type, 5 V or 12 V): GPIO26 -> 1 kΩ -> NPN base, emitter GND, buzzer between +V and collector. 12 V buzzer ≈ 30 mA: Ib = (3.3 − 0.7)/1 k = 2.6 mA, forced β ≈ 12 -> saturated. Add a 1N4148 across the buzzer if it is a magnetic (not piezo) type.
 
 ---
@@ -303,5 +329,5 @@ D1 = 1N4007 (1 A) across the lock, cathode to lock + (+12 V in options A/B, IRF4
 - **A fail-safe lock opens on power loss.** That is the point (fire egress), but it also means cutting the 12 V supply opens the door. If security matters, put the 12 V supply on a UPS / battery backup and keep the supply inside.
 - All three drivers keep the door locked while the ESP32 is in reset. If the firmware hangs in the locked state, the exit button stops working. The loop watchdog (`enableLoopWDT()`, 5 s) resets the ESP32 in that case, but for egress safety also add a **hardware emergency release**: an NC push button (or break-glass) in series with the lock's +12 V, beside the exit button.
 - Enroll button must be inside: anyone who can press it can add a card.
-- Lock power is deferred only while the door already reads open at relock. Once powered, the lock stays powered whatever the door sensor says, so cutting the sensor wire on a locked door does not unlock it. A sensor wire cut while the door is open keeps the lock unpowered, and the door-left-open alarm keeps sounding until it is fixed.
+- Lock power is deferred only while the door already reads open at relock. Once powered, the lock stays powered whatever the door sensor says, so cutting the sensor wire on a locked door does not unlock it. A sensor wire cut while the door is open keeps the lock unpowered, and the door-left-open alarm keeps sounding until it is fixed. The same holds for a cut align-switch wire while lock power is deferred.
 - Authentication is by card UID only. MIFARE Classic UIDs can be cloned with "magic" cards; acceptable for a home door, not for high security.

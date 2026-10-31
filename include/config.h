@@ -17,6 +17,7 @@ constexpr uint8_t PIN_BUZZER        = 26;  // to NPN base, active buzzer
 constexpr uint8_t PIN_DOOR_SENSE    = 27;  // door sensor NO (magnetic, in the lock), COM -> GND
 constexpr uint8_t PIN_EXIT_BUTTON   = 32;  // inside exit push button -> GND
 constexpr uint8_t PIN_ENROLL_BUTTON = 33;  // enroll push button -> GND (mount inside!)
+constexpr uint8_t PIN_DOOR_ALIGN    = 4;   // optional door-aligned microswitch -> GND (DOOR_ALIGN_SENSOR_ENABLED)
 constexpr uint8_t PIN_STATUS_LED    = 2;   // on-board LED
 
 // =====================================================================
@@ -53,7 +54,24 @@ constexpr uint8_t LOCK_LEVEL_UNLOCKED = LOCK_DRIVER_NPN_INVERTER ? HIGH : LOW;
 // Reopening within the delay restarts it on the next close.
 constexpr uint32_t RELOCK_CLOSE_DELAY_MS = 1000;
 
-// Door-left-open alarm: door still open DOOR_OPEN_ALARM_MS after relock.
+// =====================================================================
+//  Door-aligned switch (optional, for sliding doors)
+// =====================================================================
+// The lock's magnetic sensor also reports "closed" when a sliding door stops a
+// few cm short, and a powered lock then drops the bolt onto the strike body.
+// 1 -> a microswitch at the door stop, pressed only when the door is fully home,
+//      must also be closed (and settled for RELOCK_CLOSE_DELAY_MS) before the lock
+//      is powered. Once powered, the lock ignores this switch.
+// 0 -> switch not fitted or ignored.
+// Fit and wire the switch before setting 1: an open switch keeps the lock unpowered.
+#define DOOR_ALIGN_SENSOR_ENABLED 1
+
+// true  -> switch contact CLOSED (GPIO LOW) when the door is fully home (NO contact, pressed).
+// false -> switch contact OPEN when the door is fully home (NC contact).
+#define DOOR_ALIGN_CLOSED_IS_ALIGNED true
+
+// Door-left-open alarm: door still open (or, with the align switch, not fully
+// home while lock power is deferred) DOOR_OPEN_ALARM_MS after relock.
 #define DOOR_OPEN_ALARM_ENABLED 1
 
 // Forced-door alarm: door opens while locked and the bolt has had time to drop.

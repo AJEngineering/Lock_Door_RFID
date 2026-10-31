@@ -25,22 +25,23 @@ def wiring():
     # Ic pins are listed bottom -> top on each side.
     esp = A(elm.Ic(
         pins=[
-            # slot 3/7 left empty: room for the door filter cap below GPIO27
-            elm.IcPin(name='GPIO33', side='left', slot='1/7', anchorname='G33'),
-            elm.IcPin(name='GPIO32', side='left', slot='2/7', anchorname='G32'),
-            elm.IcPin(name='GPIO27', side='left', slot='4/7', anchorname='G27'),
-            elm.IcPin(name='GND', side='left', slot='5/7', anchorname='GNDL'),
-            elm.IcPin(name='3V3', side='left', slot='6/7', anchorname='V33'),
-            elm.IcPin(name='VIN (5 V)', side='left', slot='7/7', anchorname='VIN'),
-            elm.IcPin(name='GPIO26', side='right', anchorname='G26'),
-            elm.IcPin(name='GPIO25', side='right', anchorname='G25'),
-            elm.IcPin(name='GPIO22', side='right', anchorname='G22'),
-            elm.IcPin(name='GPIO5', side='right', anchorname='G5'),
-            elm.IcPin(name='GPIO23', side='right', anchorname='G23'),
-            elm.IcPin(name='GPIO19', side='right', anchorname='G19'),
-            elm.IcPin(name='GPIO18', side='right', anchorname='G18'),
+            # slot 4/8 left empty: room for the door filter cap below GPIO27
+            elm.IcPin(name='GPIO4', side='left', slot='1/8', anchorname='G4'),
+            elm.IcPin(name='GPIO33', side='left', slot='2/8', anchorname='G33'),
+            elm.IcPin(name='GPIO32', side='left', slot='3/8', anchorname='G32'),
+            elm.IcPin(name='GPIO27', side='left', slot='5/8', anchorname='G27'),
+            elm.IcPin(name='GND', side='left', slot='6/8', anchorname='GNDL'),
+            elm.IcPin(name='3V3', side='left', slot='7/8', anchorname='V33'),
+            elm.IcPin(name='VIN (5 V)', side='left', slot='8/8', anchorname='VIN'),
+            elm.IcPin(name='GPIO26', side='right', slot='2/8', anchorname='G26'),
+            elm.IcPin(name='GPIO25', side='right', slot='3/8', anchorname='G25'),
+            elm.IcPin(name='GPIO22', side='right', slot='4/8', anchorname='G22'),
+            elm.IcPin(name='GPIO5', side='right', slot='5/8', anchorname='G5'),
+            elm.IcPin(name='GPIO23', side='right', slot='6/8', anchorname='G23'),
+            elm.IcPin(name='GPIO19', side='right', slot='7/8', anchorname='G19'),
+            elm.IcPin(name='GPIO18', side='right', slot='8/8', anchorname='G18'),
         ],
-        pinspacing=1.2, edgepadH=0.7, edgepadW=0.6, leadlen=0.8, size=(4.4, 9.8),
+        pinspacing=1.2, edgepadH=0.7, edgepadW=0.6, leadlen=0.8, size=(4.4, 11.0),
     ).theta(0).at((0, 0)).label('ESP32-WROOM-32 DevKit', loc='top', fontsize=12))
 
     # ================================================================ RC522
@@ -180,16 +181,25 @@ def wiring():
         gnd((xbtn - 2.0, pin[1]))
         txt((xbtn - 2.5, pin[1]), lab, ha='right', fs=10)
 
+    # door-aligned microswitch at the door stop (optional, DOOR_ALIGN_SENSOR_ENABLED)
+    p4 = esp.G4
+    xal = p4[0] - 1.4
+    wire(p4, (xal, p4[1]))
+    A(elm.Switch().endpoints((xal, p4[1]), (xal - 2.0, p4[1])))
+    gnd((xal - 2.0, p4[1]))
+    txt((xal - 2.5, p4[1]), 'ALIGN microswitch NO\n(door stop, optional)', ha='right', fs=10)
+
     # ================================================================ notes
-    yn = min(esp.G33[1], yb) - 2.2
+    yn = min(esp.G4[1], yb) - 2.2
     notes = (
         'One common ground: 12 V (−), buck GND, ESP32 GND, Q1 source, RC522 GND.',
         'GPIO25 HIGH or Hi-Z (reset/boot) → Q1 on → lock powered → LOCKED.   GPIO25 LOW → OPEN.',
-        'Inputs use INPUT_PULLUP; add 10 kΩ + 100 nF on long button cables. 1N4148 across BZ1 if it is a magnetic buzzer.',
+        'Inputs use INPUT_PULLUP; add 10 kΩ + 100 nF on long button/switch cables. 1N4148 across BZ1 if it is a magnetic buzzer.',
+        'ALIGN switch: pressed only when the sliding door is fully home; enable with DOOR_ALIGN_SENSOR_ENABLED 1 in config.h.',
         'Recommended: NC emergency-release button in series with the lock +12 V, beside the exit button.',
     )
     for k, line in enumerate(notes):    # one label per line: matplotlib's line spacing is too tight
-        txt((esp.G33[0] - 10, yn - 0.5 * k), line, va='top', fs=10)
+        txt((esp.G4[0] - 10, yn - 0.5 * k), line, va='top', fs=10)
 
     save(d, 'wiring')
 

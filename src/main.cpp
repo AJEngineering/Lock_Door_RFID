@@ -7,6 +7,7 @@
 //                   hold 10 s   -> erase all cards
 //  - Card UIDs stored in NVS (Preferences), survive power loss
 //  - Door sensor: relock on door close, door-left-open and forced-door alarms
+//  - Optional door-aligned switch (sliding doors): lock powered only when the door is fully home
 //  - Brute-force lockout after repeated unknown cards
 //  - RC522 health check (SPI, antenna, config registers) and automatic re-init
 //  - Serial console: help, list, open, enroll, clear, time <ms>
@@ -17,7 +18,7 @@
 #include <Preferences.h>
 #include "config.h"
 
-static const char FW_VERSION[] = "1.1.0";
+static const char FW_VERSION[] = "1.2.1";
 
 // =====================================================================
 //  Debounced active-low input (INPUT_PULLUP, pressed/closed = LOW)
@@ -255,7 +256,7 @@ private:
 static MFRC522 rfid(PIN_RC522_SS, PIN_RC522_RST);
 static CardStore store;
 static Buzzer buzzer;
-static DebouncedInput exitBtn, enrollBtn, doorSense;
+static DebouncedInput exitBtn, enrollBtn, doorSense, doorAlign;
 
 static uint32_t unlockTimeMs = DEFAULT_UNLOCK_TIME_MS;
 
@@ -264,6 +265,7 @@ static uint32_t unlockStart      = 0;
 static uint32_t lockCommandedAt  = 0;
 static bool     doorWasOpened    = false;  // door opened during the current unlock window
 static uint32_t doorClosedAt     = 0;      // last open -> closed transition
+static uint32_t doorHomeChangedAt = 0;     // last change of doorHome()
 static bool     lockPowerPending = false;  // locked, lock power deferred until the door settles
 
 static bool     enrollMode       = false;
@@ -280,7 +282,11 @@ static uint32_t lockoutStart     = 0;
 static bool     doorOpenAlarm    = false;
 static bool     forcedAlarm      = false;
 static uint32_t lastAlarmAt      = 0;
+static bool     lastSecured      = true;
+static uint32_t securedChangedAt = 0;
 static uint32_t lastRfidCheck    = 0;
+static byte     lastSak          = 0;      // SAK of the last card read (card type for the log)
+static uint32_t lastReadFailLog  = 0;
 
 // =====================================================================
 //  Lock control
@@ -293,9 +299,29 @@ static bool doorClosed() {
   return DOOR_SENSE_CLOSED_IS_DOOR_CLOSED ? doorSense.isActive() : !doorSense.isActive();
 }
 
-// Door closed and settled: safe to power the lock (the bolt drops at once).
+static bool doorAligned() {
+#if DOOR_ALIGN_SENSOR_ENABLED
+  return DOOR_ALIGN_CLOSED_IS_ALIGNED ? doorAlign.isActive() : !doorAlign.isActive();
+#else
+  return true;
+#endif
+}
+
+// Door closed (lock's magnetic sensor) and fully home (align switch, if enabled).
+static bool doorHome() {
+  return doorClosed() && doorAligned();
+}
+
+// Door home and settled: safe to power the lock (the bolt drops at once).
 static bool doorSettled() {
-  return doorClosed() && millis() - doorClosedAt >= RELOCK_CLOSE_DELAY_MS;
+  return doorHome() && millis() - doorHomeChangedAt >= RELOCK_CLOSE_DELAY_MS;
+}
+
+// Door in its locked position. While lock power is deferred it must be fully home;
+// once the lock is powered the bolt holds the door and the align switch is ignored,
+// so play between bolt and strike does not raise the door-left-open alarm.
+static bool doorSecured() {
+  return lockPowerPending ? doorHome() : doorClosed();
 }
 
 static void clearAlarms() {
@@ -318,7 +344,7 @@ static void unlockDoor(const char *reason) {
   else               Serial.printf("[LOCK] open time extended (%s)\n", reason);
   // Every accepted request starts a new cycle: relock-on-close waits for a passage
   // that starts now (or is in progress, door open), not for one already finished.
-  doorWasOpened = !doorClosed();
+  doorWasOpened = !doorHome();
   doorUnlocked = true;
   lockPowerPending = false;
   unlockStart = millis();
@@ -343,7 +369,7 @@ static void lockDoor() {
     driveLock(false);
     lockPowerPending = true;
     lockCommandedAt = millis();
-    Serial.println("[LOCK] LOCKED, lock power deferred until the door is closed and settled");
+    Serial.println("[LOCK] LOCKED, lock power deferred until the door is fully closed and settled");
   }
 }
 
@@ -377,13 +403,40 @@ static void rfidInit() {
   rfid.PCD_SetAntennaGain(rfid.RxGain_max);
 }
 
+// The RC522 reads ISO/IEC 14443A cards only. Their UID is 4, 7 or 10 bytes
+// (cascade levels 1..3); all three are stored and compared with their length.
 static bool readCard(CardUid &out) {
-  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return false;
+  // Same as PICC_IsNewCardPresent(), but keeps the ATQA for the log below.
+  byte atqa[2];
+  byte atqaLen = sizeof(atqa);
+  rfid.PCD_WriteRegister(MFRC522::TxModeReg, 0x00);
+  rfid.PCD_WriteRegister(MFRC522::RxModeReg, 0x00);
+  rfid.PCD_WriteRegister(MFRC522::ModWidthReg, 0x26);
+  const MFRC522::StatusCode req = rfid.PICC_RequestA(atqa, &atqaLen);
+  if (req != MFRC522::STATUS_OK && req != MFRC522::STATUS_COLLISION) return false;  // no 14443A card in the field
+
+  const MFRC522::StatusCode sel = rfid.PICC_Select(&rfid.uid);
+  if (sel != MFRC522::STATUS_OK) {
+    // A card answered REQA but anticollision/select failed: a non-standard 14443A
+    // card (e.g. Topaz/Jewel) or poor coupling. Rate-limited: the card is not halted
+    // and answers again on every loop.
+    if (millis() - lastReadFailLog >= CARD_REPEAT_GUARD_MS) {
+      lastReadFailLog = millis();
+      Serial.printf("[RFID] card answered (ATQA %02X %02X) but UID read failed: %s\n", atqa[0], atqa[1],
+                    reinterpret_cast<const char *>(MFRC522::GetStatusCodeName(sel)));
+    }
+    return false;
+  }
   out.len = min<uint8_t>(rfid.uid.size, sizeof(out.b));
   memcpy(out.b, rfid.uid.uidByte, out.len);
+  lastSak = rfid.uid.sak;
   rfid.PICC_HaltA();
   rfid.PCD_StopCrypto1();
   return true;
+}
+
+static const char *lastCardType() {
+  return reinterpret_cast<const char *>(MFRC522::PICC_GetTypeName(MFRC522::PICC_GetType(lastSak)));
 }
 
 // The RC522 can stop reading cards while SPI still works: after ESD or a supply
@@ -432,7 +485,7 @@ static void handleCard(const CardUid &uid) {
       Serial.printf("[ENROLL] store full (%u), %s not added\n", MAX_CARDS, s);
     } else if (store.add(uid)) {
       buzzer.play(Pattern::CARD_ADDED);
-      Serial.printf("[ENROLL] added %s (%u stored)\n", s, store.count());
+      Serial.printf("[ENROLL] added %s (%u bytes, %s, %u stored)\n", s, uid.len, lastCardType(), store.count());
     } else {
       buzzer.play(Pattern::DENIED);
       Serial.printf("[ENROLL] %s NOT added (NVS write failed)\n", s);
@@ -447,7 +500,7 @@ static void handleCard(const CardUid &uid) {
     unlockDoor("card");
   } else {
     buzzer.play(Pattern::DENIED);
-    Serial.printf("[RFID] denied %s\n", s);
+    Serial.printf("[RFID] denied %s (%u bytes, %s)\n", s, uid.len, lastCardType());
     if (++deniedCount >= MAX_DENIED_ATTEMPTS) {
       lockoutActive = true;
       lockoutStart = millis();
@@ -508,7 +561,8 @@ static void processButtons() {
     }
   }
 
-  // Door sensor
+  // Door sensors
+  const bool wasHome = doorHome();
   if (doorSense.update()) {
     if (doorClosed()) {
       doorClosedAt = millis();
@@ -527,6 +581,10 @@ static void processButtons() {
 #endif
     }
   }
+#if DOOR_ALIGN_SENSOR_ENABLED
+  if (doorAlign.update()) Serial.println(doorAligned() ? "[DOOR] ALIGNED" : "[DOOR] NOT ALIGNED");
+#endif
+  if (doorHome() != wasHome) doorHomeChangedAt = millis();
 }
 
 // =====================================================================
@@ -554,17 +612,23 @@ static void processTimers() {
   // now - lockCommandedAt would then wrap to ~2^32 and fire the alarm at once.
   now = millis();
 
+  const bool secured = doorSecured();
+  if (secured != lastSecured) {
+    lastSecured = secured;
+    securedChangedAt = now;
+  }
+
 #if DOOR_OPEN_ALARM_ENABLED
-  // Door open continuously for DOOR_OPEN_ALARM_MS (a rebound after closing restarts it)
-  if (!doorUnlocked && !doorClosed() && !doorOpenAlarm && !forcedAlarm &&
-      now - lockCommandedAt >= DOOR_OPEN_ALARM_MS && doorSense.stableFor() >= DOOR_OPEN_ALARM_MS) {
+  // Door not secured continuously for DOOR_OPEN_ALARM_MS (a rebound after closing restarts it)
+  if (!doorUnlocked && !secured && !doorOpenAlarm && !forcedAlarm &&
+      now - lockCommandedAt >= DOOR_OPEN_ALARM_MS && now - securedChangedAt >= DOOR_OPEN_ALARM_MS) {
     doorOpenAlarm = true;
     lastAlarmAt = now - ALARM_REPEAT_MS;  // sound immediately
-    Serial.println("[ALARM] door left open");
+    Serial.println(doorClosed() ? "[ALARM] door not fully closed (align switch open)" : "[ALARM] door left open");
   }
 #endif
 
-  if ((doorOpenAlarm || forcedAlarm) && doorClosed()) clearAlarms();
+  if ((doorOpenAlarm || forcedAlarm) && secured) clearAlarms();
 
   if ((doorOpenAlarm || forcedAlarm) && now - lastAlarmAt >= ALARM_REPEAT_MS) {
     lastAlarmAt = now;
@@ -660,8 +724,13 @@ void setup() {
   exitBtn.begin(PIN_EXIT_BUTTON, BUTTON_DEBOUNCE_MS);
   enrollBtn.begin(PIN_ENROLL_BUTTON, BUTTON_DEBOUNCE_MS);
   doorSense.begin(PIN_DOOR_SENSE, SENSE_DEBOUNCE_MS);
-  doorClosedAt = millis() - RELOCK_CLOSE_DELAY_MS;  // door closed at boot counts as settled
-  lockDoor();  // door open at boot: lock power deferred until it closes and settles
+#if DOOR_ALIGN_SENSOR_ENABLED
+  doorAlign.begin(PIN_DOOR_ALIGN, SENSE_DEBOUNCE_MS);
+#endif
+  doorClosedAt = doorHomeChangedAt = millis() - RELOCK_CLOSE_DELAY_MS;  // door home at boot counts as settled
+  lockDoor();  // door not home at boot: lock power deferred until it is home and settled
+  lastSecured = doorSecured();
+  securedChangedAt = millis();
 
   if (!store.begin()) Serial.println("[NVS] init failed: no stored cards, default unlock time, changes not saved");
   unlockTimeMs = store.loadUnlockTime();
@@ -674,6 +743,9 @@ void setup() {
   Serial.printf("[RFID] RC522 version 0x%02X%s\n", v, (v == 0x00 || v == 0xFF) ? " (NOT FOUND - check wiring)" : "");
 
   Serial.printf("[DOOR] %s\n", doorClosed() ? "CLOSED" : "OPEN");
+#if DOOR_ALIGN_SENSOR_ENABLED
+  Serial.printf("[DOOR] align switch on GPIO%u: %s\n", PIN_DOOR_ALIGN, doorAligned() ? "ALIGNED" : "NOT ALIGNED");
+#endif
   if (store.count() == 0) Serial.println("No cards stored: press the enroll button and present a card.");
   printHelp();
 
